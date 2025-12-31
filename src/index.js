@@ -1,27 +1,40 @@
 export default {
   async fetch(request, env, ctx) {
-    return await handleRequest(env);
+    // فقط درخواست‌های POST که از طرف پایتون می‌آیند را قبول کن
+    if (request.method === "POST") {
+      return await handleRequest(request, env);
+    }
+    return new Response("Waiting for Python Data...", { status: 200 });
   },
-  async scheduled(event, env, ctx) {
-    ctx.waitUntil(handleRequest(env));
-  }
 };
 
-async function handleRequest(env) {
+async function handleRequest(request, env) {
   try {
-    const marketData = await fetchMarketData();
+    // 1. خواندن قیمتی که پایتون فرستاده
+    const body = await request.json();
+    
+    // چک کردن رمز امنیتی (که کسی الکی قیمت نفرستد)
+    const secret = request.headers.get("X-Secret-Key");
+    if (secret !== env.SECRET_KEY) {
+      return new Response("Unauthorized", { status: 403 });
+    }
+
+    const marketData = body.market_data; // قیمت و اطلاعات تکنیکال از پایتون
+
+    // 2. دریافت اخبار (اخبار هنوز توسط کلودفلر گرفته می‌شود چون بلاک نیست)
     const newsData = await fetchAllNews();
+
+    // 3. هوش مصنوعی
     const activeModel = await findBestGeminiModel(env.AI_API_KEY);
     const prompt = createPrompt(marketData, newsData);
     const analysis = await askGemini(prompt, env.AI_API_KEY, activeModel);
-    const telegramResult = await sendToTelegram(analysis, env);
 
-    return new Response(JSON.stringify({ 
-      status: "Success",
-      telegram: telegramResult,
-      model: activeModel,
-      data: marketData
-    }, null, 2), { headers: { "content-type": "application/json" } });
+    // 4. ارسال به تلگرام
+    await sendToTelegram(analysis, env);
+
+    return new Response(JSON.stringify({ status: "Success", analysis }), { 
+      headers: { "content-type": "application/json" } 
+    });
 
   } catch (error) {
     if (env.TELEGRAM_BOT_TOKEN) {
@@ -33,33 +46,14 @@ async function handleRequest(env) {
 
 // --- توابع کمکی ---
 
-async function fetchMarketData() {
-  try {
-    const res = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT');
-    const data = await res.json();
-    return {
-      price: parseFloat(data.lastPrice).toFixed(2),
-      change: parseFloat(data.priceChangePercent).toFixed(2),
-      high: parseFloat(data.highPrice).toFixed(2),
-      low: parseFloat(data.lowPrice).toFixed(2)
-    };
-  } catch (e) {
-    return { price: "N/A", change: "0", high: "0", low: "0" };
-  }
-}
-
 async function fetchAllNews() {
-  // روش جدید بدون نیاز به کتابخانه XML Parser (ساده‌سازی شده برای جلوگیری از ارور)
   const rssUrl = "https://www.kitco.com/rss/category/commodities/gold";
   try {
     const res = await fetch(rssUrl);
     const text = await res.text();
-    // استخراج ساده تیترها با Regex
     const titles = text.match(/<title>(.*?)<\/title>/g) || [];
     return titles.slice(2, 7).map(t => t.replace(/<\/?title>|<!\[CDATA\[|\]\]>/g, "").trim());
-  } catch (e) {
-    return ["News not available"];
-  }
+  } catch (e) { return ["News fetch failed"]; }
 }
 
 async function findBestGeminiModel(apiKey) {
@@ -85,25 +79,29 @@ async function askGemini(prompt, apiKey, modelName) {
 }
 
 async function sendToTelegram(text, env) {
-  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return "No Creds";
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
   const cleanText = text.replace(/\*/g, "").replace(/_/g, "-");
   await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ chat_id: env.TELEGRAM_CHAT_ID, text: cleanText })
   });
-  return "Sent";
 }
 
 function createPrompt(data, news) {
   return `
   Role: Gold Analyst (XAU/USD).
-  Price: $${data.price} (Change: ${data.change}%)
-  High/Low: ${data.high} / ${data.low}
-  News:
+  Technical Data (Source: Yahoo Finance):
+  - Price: $${data.price}
+  - Change: ${data.change}%
+  - High: ${data.high}
+  - Low: ${data.low}
+  
+  News Headlines:
   ${news.join('\n')}
   
-  Write a short Persian Telegram report with Buy/Sell signal.
+  Task: Write a Persian Telegram report.
+  Analyze price action and news. Give Buy/Sell signal.
   Use emojis.
   `;
 }
