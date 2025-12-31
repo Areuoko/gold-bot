@@ -4,7 +4,6 @@ export default {
   async fetch(request, env, ctx) {
     return await handleRequest(env);
   },
-
   async scheduled(event, env, ctx) {
     ctx.waitUntil(handleRequest(env));
   }
@@ -18,16 +17,19 @@ async function handleRequest(env) {
     ]);
 
     const prompt = createPrompt(priceData, newsData);
-    const analysis = await askGemini(prompt, env.AI_API_KEY);
+    
+    // اینجا تغییر کرد: ارسال درخواست با قابلیت تلاش مجدد روی مدل‌های مختلف
+    const analysis = await askGeminiSmart(prompt, env.AI_API_KEY);
 
     return new Response(JSON.stringify({ 
       status: "Success",
       price_source: "Binance (PAXG/USDT)",
+      used_model: analysis.model, // نشان می‌دهد کدام مدل موفق شد
       data: {
         price: priceData.price,
         news_count: newsData.length
       },
-      analysis_report: analysis 
+      analysis_report: analysis.text 
     }, null, 2), {
       headers: { "content-type": "application/json; charset=UTF-8" }
     });
@@ -47,30 +49,24 @@ async function fetchGoldPrice() {
     const response = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT');
     if (!response.ok) throw new Error("Binance API Error");
     const data = await response.json();
-    return {
-      price: parseFloat(data.price).toFixed(2)
-    };
-  } catch (e) {
-    return { price: "Error fetching price" };
-  }
+    return { price: parseFloat(data.price).toFixed(2) };
+  } catch (e) { return { price: "Error" }; }
 }
 
 async function fetchAllNews() {
   const rssFeeds = [
     "https://www.kitco.com/rss/category/commodities/gold",
-    "https://www.fxstreet.com/rss/news",
-    "https://www.dailyfx.com/feeds/market-news"
+    "https://www.fxstreet.com/rss/news"
   ];
-  
   const promises = rssFeeds.map(url => fetchRSS(url));
   const results = await Promise.all(promises);
-  return results.flat().slice(0, 15);
+  return results.flat().slice(0, 10);
 }
 
 async function fetchRSS(url) {
   try {
     const response = await fetch(url, { 
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)' } 
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1)' } 
     });
     if (!response.ok) return [];
     const text = await response.text();
@@ -78,38 +74,64 @@ async function fetchRSS(url) {
     const jsonObj = parser.parse(text);
     const items = jsonObj.rss?.channel?.item || jsonObj.feed?.entry || [];
     if (!Array.isArray(items)) return [];
-    return items.slice(0, 5).map(item => {
-      const title = item.title ? String(item.title).replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1') : "No Title";
+    return items.slice(0, 4).map(item => {
+      const title = item.title ? String(item.title).replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1') : "";
       return `- ${title}`;
     });
   } catch (e) { return []; }
 }
 
-async function askGemini(prompt, apiKey) {
+// *** تابع جدید و هوشمند برای ارتباط با هوش مصنوعی ***
+async function askGeminiSmart(prompt, apiKey) {
   if (!apiKey) throw new Error("API Key is missing!");
 
-  // *** تغییر مهم: استفاده از مدل gemini-pro که عمومی‌تر است ***
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`;
-  
-  const payload = {
-    contents: [{
-      parts: [{ text: prompt }]
-    }]
-  };
+  // لیست مدل‌هایی که به ترتیب تست می‌شوند
+  const modelsToTry = [
+    "gemini-1.5-flash",       // مدل جدید و سریع
+    "gemini-1.5-flash-latest", // نسخه آخر فلش
+    "gemini-pro",             // مدل استاندارد قدیمی
+    "gemini-1.0-pro"          // نام جایگزین
+  ];
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
+  let lastError = null;
 
-  const data = await response.json();
-  
-  if (data.error) {
-    throw new Error(`Gemini API Error: ${data.error.message}`);
+  for (const modelName of modelsToTry) {
+    try {
+      console.log(`Trying model: ${modelName}...`);
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+      
+      const payload = {
+        contents: [{ parts: [{ text: prompt }] }]
+      };
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const data = await response.json();
+
+      // اگر ارور داد، برو مدل بعدی
+      if (data.error) {
+        throw new Error(data.error.message);
+      }
+
+      // اگر موفق شد، خروجی را برگردان
+      return {
+        model: modelName,
+        text: data.candidates?.[0]?.content?.parts?.[0]?.text || "No output"
+      };
+
+    } catch (err) {
+      console.log(`Model ${modelName} failed: ${err.message}`);
+      lastError = err;
+      // حلقه ادامه پیدا می‌کند تا مدل بعدی تست شود
+    }
   }
-  
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || "No response from AI";
+
+  // اگر همه مدل‌ها شکست خوردند
+  throw new Error(`All Gemini models failed. Last error: ${lastError?.message}`);
 }
 
 function createPrompt(price, news) {
@@ -118,17 +140,13 @@ function createPrompt(price, news) {
   
   DATA:
   - Current Gold Price: $${price.price}
-  - Recent Headlines:
+  - News:
   ${news.join('\n')}
   
   TASK:
-  Provide a professional trading report in Persian (Farsi).
-  Focus on:
-  1. Fundamental Analysis (Fed, Inflation, Geopolitics based on headlines).
-  2. Technical Sentiment (based on price level).
-  3. Forecast (Short-term & Long-term).
-  
-  FORMAT:
-  Use emojis. Keep it structured. Start with "📢 گزارش اختصاصی تحلیل طلا".
+  Write a trading report in Persian (Farsi) for a Telegram channel.
+  Analyze Fundamental (News/Fed) and Technical (Price) aspects.
+  Give a prediction (Short/Long term).
+  Start with "📢 تحلیل فوری طلا".
   `;
 }
