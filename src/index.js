@@ -11,25 +11,27 @@ export default {
 
 async function handleRequest(env) {
   try {
+    // 1. دریافت داده‌ها
     const [priceData, newsData] = await Promise.all([
       fetchGoldPrice(),
       fetchAllNews()
     ]);
 
+    // 2. شناسایی مدل فعال گوگل (این بخش جدید است)
+    const activeModel = await findBestGeminiModel(env.AI_API_KEY);
+
+    // 3. ارسال درخواست با مدل پیدا شده
     const prompt = createPrompt(priceData, newsData);
-    
-    // اینجا تغییر کرد: ارسال درخواست با قابلیت تلاش مجدد روی مدل‌های مختلف
-    const analysis = await askGeminiSmart(prompt, env.AI_API_KEY);
+    const analysis = await askGemini(prompt, env.AI_API_KEY, activeModel);
 
     return new Response(JSON.stringify({ 
       status: "Success",
-      price_source: "Binance (PAXG/USDT)",
-      used_model: analysis.model, // نشان می‌دهد کدام مدل موفق شد
+      used_model: activeModel, // اسم مدلی که خودکار پیدا کرد
       data: {
         price: priceData.price,
         news_count: newsData.length
       },
-      analysis_report: analysis.text 
+      analysis_report: analysis 
     }, null, 2), {
       headers: { "content-type": "application/json; charset=UTF-8" }
     });
@@ -37,17 +39,65 @@ async function handleRequest(env) {
   } catch (error) {
     return new Response(JSON.stringify({ 
       error: "Bot Execution Failed",
-      details: error.message
+      details: error.message,
+      hint: "Check your API Key permissions in Google AI Studio"
     }, null, 2), { status: 500 });
   }
 }
 
 // --- توابع کمکی ---
 
+// *** تابع جدید: کشف خودکار مدل سالم ***
+async function findBestGeminiModel(apiKey) {
+  // پرسیدن لیست مدل‌ها از گوگل
+  const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
+  const resp = await fetch(url);
+  const data = await resp.json();
+
+  if (data.error) throw new Error(`ListModels Failed: ${data.error.message}`);
+  if (!data.models) throw new Error("No models found for this API Key");
+
+  // فیلتر کردن مدل‌هایی که قابلیت تولید متن دارند
+  const textModels = data.models.filter(m => 
+    m.supportedGenerationMethods && 
+    m.supportedGenerationMethods.includes("generateContent")
+  );
+
+  if (textModels.length === 0) throw new Error("This API Key has no access to text generation models.");
+
+  // اولویت‌بندی: اول فلش (سریع)، بعد پرو، بعد هر چی بود
+  const bestModel = textModels.find(m => m.name.includes("flash")) || 
+                    textModels.find(m => m.name.includes("pro")) || 
+                    textModels[0];
+
+  // خروجی مثلاً "models/gemini-1.5-flash" است، ما فقط اسم آخر را می‌خواهیم
+  return bestModel.name.replace("models/", "");
+}
+
+async function askGemini(prompt, apiKey, modelName) {
+  // استفاده از همان اسمی که پیدا کردیم
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+  
+  const payload = {
+    contents: [{ parts: [{ text: prompt }] }]
+  };
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+
+  const data = await response.json();
+  
+  if (data.error) throw new Error(`Gemini Error (${modelName}): ${data.error.message}`);
+  
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || "No output";
+}
+
 async function fetchGoldPrice() {
   try {
     const response = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT');
-    if (!response.ok) throw new Error("Binance API Error");
     const data = await response.json();
     return { price: parseFloat(data.price).toFixed(2) };
   } catch (e) { return { price: "Error" }; }
@@ -65,88 +115,25 @@ async function fetchAllNews() {
 
 async function fetchRSS(url) {
   try {
-    const response = await fetch(url, { 
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1)' } 
-    });
-    if (!response.ok) return [];
+    const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     const text = await response.text();
     const parser = new XMLParser();
     const jsonObj = parser.parse(text);
     const items = jsonObj.rss?.channel?.item || jsonObj.feed?.entry || [];
     if (!Array.isArray(items)) return [];
-    return items.slice(0, 4).map(item => {
-      const title = item.title ? String(item.title).replace(/<!\[CDATA\[(.*?)\]\]>/g, '$1') : "";
-      return `- ${title}`;
-    });
+    return items.slice(0, 3).map(i => `- ${i.title ?? ""}`);
   } catch (e) { return []; }
-}
-
-// *** تابع جدید و هوشمند برای ارتباط با هوش مصنوعی ***
-async function askGeminiSmart(prompt, apiKey) {
-  if (!apiKey) throw new Error("API Key is missing!");
-
-  // لیست مدل‌هایی که به ترتیب تست می‌شوند
-  const modelsToTry = [
-    "gemini-1.5-flash",       // مدل جدید و سریع
-    "gemini-1.5-flash-latest", // نسخه آخر فلش
-    "gemini-pro",             // مدل استاندارد قدیمی
-    "gemini-1.0-pro"          // نام جایگزین
-  ];
-
-  let lastError = null;
-
-  for (const modelName of modelsToTry) {
-    try {
-      console.log(`Trying model: ${modelName}...`);
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
-      
-      const payload = {
-        contents: [{ parts: [{ text: prompt }] }]
-      };
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      const data = await response.json();
-
-      // اگر ارور داد، برو مدل بعدی
-      if (data.error) {
-        throw new Error(data.error.message);
-      }
-
-      // اگر موفق شد، خروجی را برگردان
-      return {
-        model: modelName,
-        text: data.candidates?.[0]?.content?.parts?.[0]?.text || "No output"
-      };
-
-    } catch (err) {
-      console.log(`Model ${modelName} failed: ${err.message}`);
-      lastError = err;
-      // حلقه ادامه پیدا می‌کند تا مدل بعدی تست شود
-    }
-  }
-
-  // اگر همه مدل‌ها شکست خوردند
-  throw new Error(`All Gemini models failed. Last error: ${lastError?.message}`);
 }
 
 function createPrompt(price, news) {
   return `
   You are an expert Financial Analyst for Gold (XAU/USD).
-  
-  DATA:
-  - Current Gold Price: $${price.price}
-  - News:
+  Current Price: $${price.price}
+  News Headlines:
   ${news.join('\n')}
   
-  TASK:
-  Write a trading report in Persian (Farsi) for a Telegram channel.
-  Analyze Fundamental (News/Fed) and Technical (Price) aspects.
-  Give a prediction (Short/Long term).
-  Start with "📢 تحلیل فوری طلا".
+  Task: Write a short, professional analysis in Persian (Farsi) for Telegram.
+  Include: Fundamental check, Technical check, and a Prediction (Short/Long term).
+  Start with: "📢 گزارش هوشمند طلا"
   `;
 }
