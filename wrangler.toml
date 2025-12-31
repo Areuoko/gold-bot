@@ -1,0 +1,7 @@
+name = "gold-bot"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+
+# تنظیم اجرای خودکار: ساعت 8 صبح و 8 شب (به وقت جهانی)
+[triggers]
+crons = ["0 8 * * *", "0 20 * * *"]
