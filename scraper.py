@@ -1,67 +1,68 @@
-import yfinance as yf
 import requests
 import os
 import sys
 
-# تنظیمات (این‌ها را از متغیرهای گیت‌هاب می‌خواند)
-# اگر آدرس ورکر خودت را داری اینجا جایگزین کن، وگرنه از Env می‌خواند
-CLOUDFLARE_URL = os.environ.get("WORKER_URL") 
+# تنظیمات
+WORKER_URL = os.environ.get("WORKER_URL")
 SECRET_KEY = os.environ.get("SECRET_KEY")
 
-def get_gold_data():
-    print("📈 Fetching Global Gold (XAU/USD) from Yahoo Finance...")
+def get_gold_price():
+    print("⏳ Connecting to Binance API...")
     try:
-        # دریافت داده‌های طلای جهانی (GC=F فیوچرز طلا)
-        gold = yf.Ticker("GC=F")
-        hist = gold.history(period="1d")
+        # دریافت قیمت PAXG (طلای جهانی)
+        url = "https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT"
+        resp = requests.get(url, timeout=10)
         
-        if hist.empty:
-            print("❌ Data is empty!")
+        if resp.status_code != 200:
+            print(f"❌ Binance API Failed: {resp.status_code}")
             return None
-
-        current = hist['Close'].iloc[-1]
-        open_price = hist['Open'].iloc[-1]
-        high = hist['High'].iloc[-1]
-        low = hist['Low'].iloc[-1]
+            
+        data = resp.json()
         
-        # محاسبه درصد تغییر
-        change = ((current - open_price) / open_price) * 100
-        
-        data = {
-            "price": round(current, 2),
-            "change": round(change, 2),
-            "high": round(high, 2),
-            "low": round(low, 2)
+        market_data = {
+            "price": float(data['lastPrice']),
+            "change": float(data['priceChangePercent']),
+            "high": float(data['highPrice']),
+            "low": float(data['lowPrice']),
+            "source": "Binance via GitHub"
         }
-        print(f"✅ Data Fetched: {data}")
-        return data
+        print(f"✅ Price Found: ${market_data['price']}")
+        return market_data
+
     except Exception as e:
-        print(f"❌ Error fetching gold: {e}")
+        print(f"❌ Error fetching price: {e}")
         return None
 
 def send_to_worker(data):
-    if not CLOUDFLARE_URL:
+    if not WORKER_URL:
         print("❌ Error: WORKER_URL is missing!")
-        return
+        sys.exit(1)
 
-    print(f"🚀 Sending to Cloudflare: {CLOUDFLARE_URL}")
-    payload = {"market_data": data}
+    print(f"🚀 Sending data to: {WORKER_URL}")
+    
     headers = {
         "X-Secret-Key": SECRET_KEY,
         "Content-Type": "application/json"
     }
     
+    payload = {"market_data": data}
+
     try:
-        resp = requests.post(CLOUDFLARE_URL, json=payload, headers=headers)
-        print(f"📡 Response Status: {resp.status_code}")
-        print(f"📡 Response Body: {resp.text}")
+        resp = requests.post(WORKER_URL, json=payload, headers=headers, timeout=10)
+        print(f"📡 Worker Response: {resp.status_code}")
+        
+        if resp.status_code == 200:
+            print("✅ SUCCESS! Message sent to Telegram.")
+        else:
+            print(f"⚠️ Worker Error: {resp.text}")
+            
     except Exception as e:
-        print(f"❌ Connection Error: {e}")
+        print(f"❌ Failed to send to Worker: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    gold_data = get_gold_data()
-    if gold_data:
-        send_to_worker(gold_data)
+    data = get_gold_price()
+    if data:
+        send_to_worker(data)
     else:
-        print("Failed to get data. Exiting.")
         sys.exit(1)
