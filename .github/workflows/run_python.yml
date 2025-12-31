@@ -1,0 +1,28 @@
+name: Run Gold Scraper
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # اجرا هر 6 ساعت
+  workflow_dispatch: # دکمه اجرای دستی برای تست
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+          
+      - name: Install Libraries
+        run: pip install yfinance requests
+
+      - name: Run Scraper
+        env:
+          # ⚠️ مهم: آدرس ربات خودت را اینجا بنویس
+          # مثلا: https://gold-bot.ali.workers.dev
+          WORKER_URL: https://gold-bot.ehsanrasooli007.workers.dev 
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+        run: python scraper.py
