@@ -3,7 +3,7 @@ name: Run Gold Scraper
 on:
   schedule:
     - cron: '0 */6 * * *' # اجرا هر 6 ساعت
-  workflow_dispatch: # دکمه اجرا دستی
+  workflow_dispatch: # دکمه اجرای دستی
 
 jobs:
   run-script:
@@ -17,12 +17,12 @@ jobs:
           python-version: '3.9'
           
       - name: Install Libraries
-        run: pip install yfinance requests
+        run: pip install requests
 
       - name: Run Scraper
         env:
-          # ⚠️ اینجا حتما آدرس ربات خودت رو چک کن که درست باشه
-          WORKER_URL: 'https://gold-bot.tilapila007.workers.dev' 
+          # آدرس دقیق ربات شما
+          WORKER_URL: 'https://gold-bot.ehsanrasooli007.workers.dev/'
           SECRET_KEY: ${{ secrets.SECRET_KEY }}
-        # 👇 تغییر مهم اینجاست: آدرس فایل رو درست دادیم
+        # اجرای فایل پایتون (چون فایل در صفحه اصلی است، src لازم نیست)
         run: python scraper.py
