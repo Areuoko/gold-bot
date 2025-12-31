@@ -25,13 +25,13 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          # این بخش رمزها را به ربات تزریق می‌کند
           secrets: |
             AI_API_KEY
             TELEGRAM_BOT_TOKEN
             TELEGRAM_CHAT_ID
+            SECRET_KEY
         env:
-          # اتصال مخزن اسرار گیت‌هاب به متغیرهای محیطی
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
