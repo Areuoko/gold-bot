@@ -25,4 +25,4 @@ jobs:
           WORKER_URL: 'https://gold-bot.tilapila007.workers.dev' 
           SECRET_KEY: ${{ secrets.SECRET_KEY }}
         # 👇 تغییر مهم اینجاست: آدرس فایل رو درست دادیم
-        run: python src/scraper.py
+        run: python scraper.py
