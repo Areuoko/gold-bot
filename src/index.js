@@ -1,5 +1,3 @@
-import { XMLParser } from 'fast-xml-parser';
-
 export default {
   async fetch(request, env, ctx) {
     return await handleRequest(env);
@@ -11,84 +9,101 @@ export default {
 
 async function handleRequest(env) {
   try {
-    // 1. دریافت داده‌های بازار (با مدیریت خطای پیشرفته)
     const marketData = await fetchMarketData();
-    
-    // 2. دریافت اخبار
     const newsData = await fetchAllNews();
-
-    // 3. پیدا کردن مدل هوش مصنوعی
     const activeModel = await findBestGeminiModel(env.AI_API_KEY);
-
-    // 4. ساخت پرامپت
     const prompt = createPrompt(marketData, newsData);
-
-    // 5. دریافت تحلیل از هوش مصنوعی
     const analysis = await askGemini(prompt, env.AI_API_KEY, activeModel);
-
-    // 6. ارسال به تلگرام
     const telegramResult = await sendToTelegram(analysis, env);
 
     return new Response(JSON.stringify({ 
       status: "Success",
-      telegram_sent: telegramResult,
-      model_used: activeModel,
-      market_data: marketData,
-      report_preview: analysis 
-    }, null, 2), {
-      headers: { "content-type": "application/json; charset=UTF-8" }
-    });
+      telegram: telegramResult,
+      model: activeModel,
+      data: marketData
+    }, null, 2), { headers: { "content-type": "application/json" } });
 
   } catch (error) {
-    // ارسال گزارش خطا به تلگرام برای اطلاع شما
-    if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
-      await sendToTelegram(`❌ خطا در ربات:\n${error.message}`, env);
+    if (env.TELEGRAM_BOT_TOKEN) {
+      await sendToTelegram(`❌ Error: ${error.message}`, env);
     }
-    return new Response(JSON.stringify({ 
-      error: "Bot Failed", 
-      details: error.message,
-      stack: error.stack
-    }, null, 2), { status: 500 });
+    return new Response(error.message, { status: 500 });
   }
 }
 
-// ------------------------------------------
-// توابع کمکی (Helper Functions)
-// ------------------------------------------
-
-// تابع دریافت JSON ایمن (برای جلوگیری از ارور Unexpected end of JSON)
-async function safeJsonFetch(url) {
-  try {
-    const response = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-    if (!response.ok) return null; // اگر خطا داد، نال برگردان
-    const text = await response.text(); // اول متن را بگیر
-    if (!text) return null; // اگر خالی بود، نال برگردان
-    return JSON.parse(text); // حالا تبدیل کن
-  } catch (e) {
-    return null;
-  }
-}
+// --- توابع کمکی ---
 
 async function fetchMarketData() {
-  // تلاش اول: بایننس
-  const binanceData = await safeJsonFetch('https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT');
-  
-  if (binanceData && binanceData.lastPrice) {
+  try {
+    const res = await fetch('https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT');
+    const data = await res.json();
     return {
-      price: parseFloat(binanceData.lastPrice).toFixed(2),
-      changePercent: parseFloat(binanceData.priceChangePercent).toFixed(2),
-      high: parseFloat(binanceData.highPrice).toFixed(2),
-      low: parseFloat(binanceData.lowPrice).toFixed(2),
-      volume: parseFloat(binanceData.volume).toFixed(2),
-      source: "Binance"
+      price: parseFloat(data.lastPrice).toFixed(2),
+      change: parseFloat(data.priceChangePercent).toFixed(2),
+      high: parseFloat(data.highPrice).toFixed(2),
+      low: parseFloat(data.lowPrice).toFixed(2)
     };
+  } catch (e) {
+    return { price: "N/A", change: "0", high: "0", low: "0" };
   }
+}
 
-  // تلاش دوم: کوین‌گکو (بکاپ)
-  const geckoData = await safeJsonFetch('https://api.coingecko.com/api/v3/simple/price?ids=pax-gold&vs_currencies=usd&include_24hr_change=true');
+async function fetchAllNews() {
+  // روش جدید بدون نیاز به کتابخانه XML Parser (ساده‌سازی شده برای جلوگیری از ارور)
+  const rssUrl = "https://www.kitco.com/rss/category/commodities/gold";
+  try {
+    const res = await fetch(rssUrl);
+    const text = await res.text();
+    // استخراج ساده تیترها با Regex
+    const titles = text.match(/<title>(.*?)<\/title>/g) || [];
+    return titles.slice(2, 7).map(t => t.replace(/<\/?title>|<!\[CDATA\[|\]\]>/g, "").trim());
+  } catch (e) {
+    return ["News not available"];
+  }
+}
+
+async function findBestGeminiModel(apiKey) {
+  if (!apiKey) return "gemini-pro";
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+    const data = await res.json();
+    const models = data.models || [];
+    const best = models.find(m => m.name.includes("flash") && m.supportedGenerationMethods?.includes("generateContent"));
+    return best ? best.name.replace("models/", "") : "gemini-pro";
+  } catch (e) { return "gemini-pro"; }
+}
+
+async function askGemini(prompt, apiKey, modelName) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+  });
+  const data = await res.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || "No AI Response";
+}
+
+async function sendToTelegram(text, env) {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return "No Creds";
+  const cleanText = text.replace(/\*/g, "").replace(/_/g, "-");
+  await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: env.TELEGRAM_CHAT_ID, text: cleanText })
+  });
+  return "Sent";
+}
+
+function createPrompt(data, news) {
+  return `
+  Role: Gold Analyst (XAU/USD).
+  Price: $${data.price} (Change: ${data.change}%)
+  High/Low: ${data.high} / ${data.low}
+  News:
+  ${news.join('\n')}
   
-  if (geckoData && geckoData['pax-gold']) {
-    return {
-      price: geckoData[
+  Write a short Persian Telegram report with Buy/Sell signal.
+  Use emojis.
+  `;
+}
