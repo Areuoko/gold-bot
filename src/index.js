@@ -1,70 +1,56 @@
 export default {
-  async fetch(request, env, ctx) {
-    // فقط درخواست‌های POST که از طرف پایتون می‌آیند را قبول کن
+  async fetch(request, env) {
     if (request.method === "POST") {
       return await handleRequest(request, env);
     }
-    return new Response("Waiting for Python Data...", { status: 200 });
+    return new Response("Bot is Ready. Waiting for Python...", { status: 200 });
   },
 };
 
 async function handleRequest(request, env) {
   try {
-    // 1. خواندن قیمتی که پایتون فرستاده
     const body = await request.json();
     
-    // چک کردن رمز امنیتی (که کسی الکی قیمت نفرستد)
-    const secret = request.headers.get("X-Secret-Key");
-    if (secret !== env.SECRET_KEY) {
-      return new Response("Unauthorized", { status: 403 });
+    // بررسی رمز
+    if (request.headers.get("X-Secret-Key") !== env.SECRET_KEY) {
+      return new Response("Forbidden", { status: 403 });
     }
 
-    const marketData = body.market_data; // قیمت و اطلاعات تکنیکال از پایتون
+    // استخراج داده‌هایی که پایتون فرستاده
+    const { market_data, news_list, date, time } = body;
 
-    // 2. دریافت اخبار (اخبار هنوز توسط کلودفلر گرفته می‌شود چون بلاک نیست)
-    const newsData = await fetchAllNews();
-
-    // 3. هوش مصنوعی
+    // پیدا کردن مدل هوش مصنوعی
     const activeModel = await findBestGeminiModel(env.AI_API_KEY);
-    const prompt = createPrompt(marketData, newsData);
+    
+    // ساخت پرامپت دقیق با داده‌های کامل
+    const prompt = createPrompt(market_data, news_list, date, time);
+    
+    // تحلیل
     const analysis = await askGemini(prompt, env.AI_API_KEY, activeModel);
-
-    // 4. ارسال به تلگرام
+    
+    // ارسال به تلگرام
     await sendToTelegram(analysis, env);
 
-    return new Response(JSON.stringify({ status: "Success", analysis }), { 
+    return new Response(JSON.stringify({ status: "Sent", model: activeModel }), { 
       headers: { "content-type": "application/json" } 
     });
 
   } catch (error) {
-    if (env.TELEGRAM_BOT_TOKEN) {
-      await sendToTelegram(`❌ Error: ${error.message}`, env);
-    }
+    if(env.TELEGRAM_BOT_TOKEN) await sendToTelegram(`⚠️ Error: ${error.message}`, env);
     return new Response(error.message, { status: 500 });
   }
 }
 
-// --- توابع کمکی ---
-
-async function fetchAllNews() {
-  const rssUrl = "https://www.kitco.com/rss/category/commodities/gold";
-  try {
-    const res = await fetch(rssUrl);
-    const text = await res.text();
-    const titles = text.match(/<title>(.*?)<\/title>/g) || [];
-    return titles.slice(2, 7).map(t => t.replace(/<\/?title>|<!\[CDATA\[|\]\]>/g, "").trim());
-  } catch (e) { return ["News fetch failed"]; }
-}
+// --- توابع ---
 
 async function findBestGeminiModel(apiKey) {
-  if (!apiKey) return "gemini-pro";
   try {
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
     const data = await res.json();
     const models = data.models || [];
-    const best = models.find(m => m.name.includes("flash") && m.supportedGenerationMethods?.includes("generateContent"));
+    const best = models.find(m => m.name.includes("flash")) || models.find(m => m.name.includes("pro"));
     return best ? best.name.replace("models/", "") : "gemini-pro";
-  } catch (e) { return "gemini-pro"; }
+  } catch(e) { return "gemini-pro"; }
 }
 
 async function askGemini(prompt, apiKey, modelName) {
@@ -75,7 +61,7 @@ async function askGemini(prompt, apiKey, modelName) {
     body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
   });
   const data = await res.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || "No AI Response";
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || "AI Error";
 }
 
 async function sendToTelegram(text, env) {
@@ -88,20 +74,30 @@ async function sendToTelegram(text, env) {
   });
 }
 
-function createPrompt(data, news) {
+function createPrompt(data, news, date, time) {
   return `
-  Role: Gold Analyst (XAU/USD).
-  Technical Data (Source: Yahoo Finance):
+  Role: Senior Gold Market Analyst.
+  Current Time: ${date} | ${time}
+  
+  📊 LIVE MARKET DATA (XAU/USD):
   - Price: $${data.price}
-  - Change: ${data.change}%
-  - High: ${data.high}
-  - Low: ${data.low}
+  - Change (24h): ${data.change_percent}%
+  - Day High: $${data.high} (Strong Resistance)
+  - Day Low: $${data.low} (Strong Support)
   
-  News Headlines:
-  ${news.join('\n')}
+  📰 LATEST NEWS HEADLINES:
+  ${news.length > 0 ? news.join('\n') : "No major news currently."}
   
-  Task: Write a Persian Telegram report.
-  Analyze price action and news. Give Buy/Sell signal.
-  Use emojis.
+  TASK:
+  Write a highly professional Persian Telegram report.
+  
+  STRUCTURE:
+  1. 🗓 **تاریخ و زمان:** (Use the provided date/time)
+  2. 💰 **وضعیت بازار:** (Analyze price vs High/Low)
+  3. 🌍 **فاندامنتال:** (Analyze news impacts if any, or general market sentiment)
+  4. ⚔️ **سطوح کلیدی:** (Highlight the High and Low as trading zones)
+  5. 🔮 **سیگنال:** (Bullish/Bearish/Neutral based on data)
+  
+  TONE: Professional, financial, use emojis. Do NOT use placeholders like [Date]. Use exact data provided.
   `;
 }
