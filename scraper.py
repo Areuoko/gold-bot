@@ -1,85 +1,111 @@
 import requests
 import os
 import sys
-import time
+import datetime
+import re
 
 # تنظیمات
 WORKER_URL = os.environ.get("WORKER_URL")
 SECRET_KEY = os.environ.get("SECRET_KEY")
 
-def get_gold_price():
-    print("⏳ Connecting to CoinGecko API...")
+# 1. دریافت قیمت دقیق + سقف و کف از یاهو فایننس
+def get_gold_data():
+    print("⏳ Fetching Data from Yahoo Finance (GC=F)...")
     try:
-        # استفاده از API کوین‌گکو برای قیمت PAX Gold (معادل طلای جهانی)
-        # این API تحریم نیست و نیاز به فیلترشکن ندارد
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=pax-gold&vs_currencies=usd&include_24hr_change=true"
-        
-        # هدر مرورگر برای اینکه ربات تشخیص داده نشود
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        
-        resp = requests.get(url, headers=headers, timeout=15)
+        # دریافت داده‌های فیوچرز طلا (استاندارد جهانی)
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1d&range=1d"
+        resp = requests.get(url, headers=headers, timeout=10)
         
         if resp.status_code != 200:
-            print(f"❌ CoinGecko API Failed: {resp.status_code}")
-            print(resp.text)
-            return None
-            
-        data = resp.json()
-        
-        # استخراج داده‌ها
-        if 'pax-gold' not in data:
-            print("❌ Error: 'pax-gold' not found in response.")
+            print("❌ Yahoo Finance Failed.")
             return None
 
+        data = resp.json()['chart']['result'][0]
+        quote = data['meta']
+        
+        # استخراج داده‌های دقیق
         market_data = {
-            "price": float(data['pax-gold']['usd']),
-            "change": float(data['pax-gold']['usd_24h_change']),
-            "high": "N/A", # کوین‌گکو در حالت رایگان سقف/کف نمی‌دهد
-            "low": "N/A",
-            "source": "CoinGecko (PAXG)"
+            "price": round(quote['regularMarketPrice'], 2),
+            "prev_close": round(quote['previousClose'], 2),
+            "high": round(quote['regularMarketDayHigh'], 2),
+            "low": round(quote['regularMarketDayLow'], 2),
+            "change_percent": 0.0
         }
-        print(f"✅ Price Found: ${market_data['price']}")
+        
+        # محاسبه درصد تغییر
+        diff = market_data['price'] - market_data['prev_close']
+        market_data['change_percent'] = round((diff / market_data['prev_close']) * 100, 2)
+        
+        print(f"✅ Price: ${market_data['price']} | High: {market_data['high']} | Low: {market_data['low']}")
         return market_data
 
     except Exception as e:
-        print(f"❌ Error fetching price: {e}")
+        print(f"❌ Error getting price: {e}")
         return None
 
-def send_to_worker(data):
+# 2. دریافت اخبار (توسط پایتون انجام می‌شود تا بلاک نشود)
+def get_news():
+    print("⏳ Fetching News...")
+    news_list = []
+    urls = [
+        "https://www.kitco.com/rss/category/commodities/gold",
+        "https://www.fxstreet.com/rss/news"
+    ]
+    
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                # استخراج ساده تیترها با Regex
+                titles = re.findall(r'<title>(.*?)</title>', resp.text)
+                # حذف تگ‌های اضافه و تمیزکاری
+                clean_titles = [t.replace("<![CDATA[", "").replace("]]>", "").strip() for t in titles]
+                # حذف تیترهای تکراری یا نامربوط (مثل اسم سایت)
+                filtered = [t for t in clean_titles if len(t) > 15 and "Kitco" not in t][:3]
+                news_list.extend(filtered)
+        except:
+            continue
+            
+    print(f"✅ Fetched {len(news_list)} news headlines.")
+    return news_list[:6] # ارسال 6 خبر مهم
+
+# 3. ارسال همه چیز به کلودفلر
+def send_payload(market_data, news_list):
     if not WORKER_URL:
-        print("❌ CRITICAL ERROR: WORKER_URL is missing!")
+        print("❌ WORKER_URL missing.")
         sys.exit(1)
 
-    print(f"🚀 Sending data to: {WORKER_URL}")
-    
-    headers = {
-        "X-Secret-Key": SECRET_KEY,
-        "Content-Type": "application/json"
-    }
-    
-    payload = {"market_data": data}
+    # محاسبه تاریخ و ساعت دقیق
+    now = datetime.datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H:%M UTC")
 
+    payload = {
+        "market_data": market_data,
+        "news_list": news_list,
+        "date": date_str,
+        "time": time_str
+    }
+
+    print("🚀 Sending full payload to Worker...")
+    headers = {"X-Secret-Key": SECRET_KEY, "Content-Type": "application/json"}
+    
     try:
         resp = requests.post(WORKER_URL, json=payload, headers=headers, timeout=20)
-        print(f"📡 Worker Status: {resp.status_code}")
-        print(f"📡 Worker Response: {resp.text}")
-        
-        if resp.status_code == 200:
-            print("✅ SUCCESS! Message sent to Telegram.")
-        else:
-            print("⚠️ Worker did not return 200. Check Worker Logs.")
-            sys.exit(1)
-            
+        print(f"📡 Response: {resp.text}")
     except Exception as e:
-        print(f"❌ Failed to send to Worker: {e}")
+        print(f"❌ Send Failed: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
-    data = get_gold_price()
+    data = get_gold_data()
+    news = get_news()
+    
     if data:
-        send_to_worker(data)
+        send_payload(data, news)
     else:
-        print("❌ Failed to get gold price. Exiting.")
+        print("❌ Failed to get data.")
         sys.exit(1)
